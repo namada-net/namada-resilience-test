@@ -1,6 +1,5 @@
 use namada_sdk::args::{self, TxBuilder, TxTransparentSource, TxTransparentTarget};
-use namada_sdk::signing::SigningTxData;
-use namada_sdk::tx::data::GasLimit;
+use namada_sdk::signing::SigningData;
 use namada_sdk::tx::Tx;
 use namada_sdk::Namada;
 use typed_builder::TypedBuilder;
@@ -11,7 +10,7 @@ use crate::error::TaskError;
 use crate::state::State;
 use crate::task::{TaskContext, TaskSettings};
 use crate::types::{Alias, Amount};
-use crate::utils::{get_balance, get_token, is_native_denom, RetryConfig};
+use crate::utils::{get_balance, get_token, is_native_denom, wrapper_tx, RetryConfig};
 
 #[derive(Clone, Debug, TypedBuilder)]
 pub struct TransparentTransfer {
@@ -38,7 +37,7 @@ impl TaskContext for TransparentTransfer {
         Some(&self.settings)
     }
 
-    async fn build_tx(&self, ctx: &Ctx) -> Result<(Tx, Vec<SigningTxData>, args::Tx), TaskError> {
+    async fn build_tx(&self, ctx: &Ctx) -> Result<(Tx, SigningData, args::Tx), TaskError> {
         let wallet = ctx.namada.wallet.read().await;
 
         let source_address = wallet
@@ -50,9 +49,6 @@ impl TaskContext for TransparentTransfer {
             .ok_or_else(|| TaskError::Wallet(format!("No target address: {}", self.target.name)))?
             .into_owned();
         let (token_address, amount) = get_token(ctx, &self.denom, self.amount).await?;
-        let fee_payer = wallet
-            .find_public_key(&self.settings.gas_payer.name)
-            .map_err(|e| TaskError::Wallet(e.to_string()))?;
 
         let sources = vec![TxTransparentSource {
             source: source_address,
@@ -66,9 +62,6 @@ impl TaskContext for TransparentTransfer {
         }];
 
         let mut transfer_tx_builder = ctx.namada.new_transparent_transfer(sources, targets);
-        transfer_tx_builder =
-            transfer_tx_builder.gas_limit(GasLimit::from(self.settings.gas_limit));
-        transfer_tx_builder = transfer_tx_builder.wrapper_fee_payer(fee_payer);
         let mut signing_keys = vec![];
         for signer in &self.settings.signers {
             let public_key = wallet
@@ -79,12 +72,20 @@ impl TaskContext for TransparentTransfer {
         transfer_tx_builder = transfer_tx_builder.signing_keys(signing_keys);
         drop(wallet);
 
+        let wrapper = wrapper_tx(
+            ctx,
+            Some(self.settings.gas_payer.clone()),
+            Some(self.settings.gas_limit),
+        )
+        .await;
+        transfer_tx_builder = transfer_tx_builder.wrap_it(Some(wrapper));
+
         let (transfer_tx, signing_data) = transfer_tx_builder
             .build(&ctx.namada)
             .await
             .map_err(|e| TaskError::BuildTx(e.to_string()))?;
 
-        Ok((transfer_tx, vec![signing_data], transfer_tx_builder.tx))
+        Ok((transfer_tx, signing_data, transfer_tx_builder.tx))
     }
 
     async fn build_checks(

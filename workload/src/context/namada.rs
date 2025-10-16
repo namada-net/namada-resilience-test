@@ -52,10 +52,7 @@ pub async fn namada_ctx(config: &AppConfig) -> Result<NamadaCtx, String> {
     std::fs::create_dir_all(&shielded_ctx_path).expect("Create masp directory failed");
     let mut shielded_ctx = ShieldedContext::new(FsShieldedUtils::new(shielded_ctx_path.clone()));
     if shielded_ctx_path.join("shielded.dat").exists() {
-        shielded_ctx
-            .load()
-            .await
-            .expect("Should be able to load shielded context");
+        shielded_ctx.load().await;
     } else {
         shielded_ctx.save().await.unwrap();
     }

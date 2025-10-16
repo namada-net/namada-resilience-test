@@ -195,9 +195,51 @@ services:
     networks:
       namada-net:
         ipv4_address: 30.0.0.23
+  indexer-chain:
+    container_name: indexer-chain
+    hostname: indexer-chain
+    image: "${INDEXER_IMAGE_PREFIX:-ghcr.io/namada-net/nrt-indexer}-chain:${INDEXER_IMAGE_TAG:-master}"
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -x chain >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+    environment:
+      - TENDERMINT_URL=http://30.0.0.15:26657
+      - DATABASE_URL=postgres://postgres:password@30.0.0.21:5432/masp_indexer_local
+      - INITIAL_QUERY_RETRY_TIME=15
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      namada-net:
+        ipv4_address: 30.0.0.24
+  indexer-transactions:
+    container_name: indexer-transactions
+    hostname: indexer-transactions
+    image: "${INDEXER_IMAGE_PREFIX:-ghcr.io/namada-net/nrt-indexer}-transactions:${INDEXER_IMAGE_TAG:-master}"
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -x transactions >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+    environment:
+      - TENDERMINT_URL=http://30.0.0.15:26657
+      - DATABASE_URL=postgres://postgres:password@30.0.0.21:5432/masp_indexer_local
+      - INITIAL_QUERY_RETRY_TIME=15
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      namada-net:
+        ipv4_address: 30.0.0.25
   gaia:
     container_name: gaia
-    image: ghcr.io/cosmos/gaia:v22.3.1
+    image: ghcr.io/cosmos/gaia:v25.1.0
     restart: always
     entrypoint: /entrypoint.sh
     environment:
@@ -237,6 +279,31 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./container_ready/:/container_ready
     network_mode: host
+
+  watchdog:
+    image: docker:27-cli
+    container_name: watchdog
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    restart: no
+    environment:
+      CRITICAL: "indexer-chain indexer-transactions"
+      INTERVAL: 5
+    command: >
+      sh -c '
+      while true; do
+        for n in $$CRITICAL; do
+          s=$$(docker inspect -f "{{.State.Status}}" "$$n" 2>/dev/null || echo "missing")
+          echo "[watchdog] $$n => $$s"
+          case "$$s" in
+            missing*|exited*|dead*) echo "[watchdog] $$n stopped"; exit 1;;
+          esac
+        done
+        sleep $${INTERVAL:-3}
+      done'
+    depends_on:
+      - indexer-chain
+      - indexer-transactions
 
 networks:
   namada-net:

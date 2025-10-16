@@ -12,6 +12,7 @@ RUN apt-get update -y && \
     libssl-dev \
     pkg-config \
     libclang-13-dev \
+    clang \
     build-essential \
     protobuf-compiler \
     libprotobuf-dev \

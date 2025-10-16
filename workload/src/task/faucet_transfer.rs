@@ -1,7 +1,6 @@
 use namada_sdk::args::{self, InputAmount, TxBuilder, TxTransparentSource, TxTransparentTarget};
-use namada_sdk::signing::SigningTxData;
+use namada_sdk::signing::SigningData;
 use namada_sdk::token::{self, DenominatedAmount};
-use namada_sdk::tx::data::GasLimit;
 use namada_sdk::tx::Tx;
 use namada_sdk::Namada;
 use typed_builder::TypedBuilder;
@@ -12,7 +11,7 @@ use crate::error::TaskError;
 use crate::state::State;
 use crate::task::{TaskContext, TaskSettings};
 use crate::types::{Alias, Amount};
-use crate::utils::{get_balance, RetryConfig};
+use crate::utils::{get_balance, wrapper_tx, RetryConfig};
 
 #[derive(Clone, Debug, TypedBuilder)]
 pub struct FaucetTransfer {
@@ -34,7 +33,7 @@ impl TaskContext for FaucetTransfer {
         Some(&self.settings)
     }
 
-    async fn build_tx(&self, ctx: &Ctx) -> Result<(Tx, Vec<SigningTxData>, args::Tx), TaskError> {
+    async fn build_tx(&self, ctx: &Ctx) -> Result<(Tx, SigningData, args::Tx), TaskError> {
         let wallet = ctx.namada.wallet.read().await;
 
         let faucet_alias = Alias::faucet();
@@ -57,9 +56,6 @@ impl TaskContext for FaucetTransfer {
                 ))
             })?
             .into_owned();
-        let fee_payer = wallet
-            .find_public_key(&self.settings.gas_payer.name)
-            .map_err(|e| TaskError::Wallet(e.to_string()))?;
         let token_amount = token::Amount::from_u64(self.amount);
         let amount = InputAmount::Unvalidated(DenominatedAmount::native(token_amount));
 
@@ -76,10 +72,6 @@ impl TaskContext for FaucetTransfer {
 
         let mut transfer_tx_builder = ctx.namada.new_transparent_transfer(sources, targets);
 
-        transfer_tx_builder =
-            transfer_tx_builder.gas_limit(GasLimit::from(self.settings.gas_limit));
-        transfer_tx_builder = transfer_tx_builder.wrapper_fee_payer(fee_payer);
-
         let mut signing_keys = vec![];
         for signer in &self.settings.signers {
             let public_key = wallet
@@ -90,12 +82,20 @@ impl TaskContext for FaucetTransfer {
         transfer_tx_builder = transfer_tx_builder.signing_keys(signing_keys);
         drop(wallet);
 
+        let wrapper = wrapper_tx(
+            ctx,
+            Some(self.settings.gas_payer.clone()),
+            Some(self.settings.gas_limit),
+        )
+        .await;
+        transfer_tx_builder = transfer_tx_builder.wrap_it(Some(wrapper));
+
         let (transfer_tx, signing_data) = transfer_tx_builder
             .build(&ctx.namada)
             .await
             .map_err(|e| TaskError::BuildTx(e.to_string()))?;
 
-        Ok((transfer_tx, vec![signing_data], transfer_tx_builder.tx))
+        Ok((transfer_tx, signing_data, transfer_tx_builder.tx))
     }
 
     async fn build_checks(

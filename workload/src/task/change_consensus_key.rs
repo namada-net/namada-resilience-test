@@ -1,7 +1,6 @@
 use namada_sdk::args::{self, TxBuilder};
 use namada_sdk::key::{RefTo, SchemeType};
-use namada_sdk::signing::SigningTxData;
-use namada_sdk::tx::data::GasLimit;
+use namada_sdk::signing::SigningData;
 use namada_sdk::tx::Tx;
 use namada_sdk::Namada;
 use rand::rngs::OsRng;
@@ -13,7 +12,7 @@ use crate::error::TaskError;
 use crate::state::State;
 use crate::task::{TaskContext, TaskSettings};
 use crate::types::Alias;
-use crate::utils::RetryConfig;
+use crate::utils::{wrapper_tx, RetryConfig};
 
 #[derive(Clone, Debug, TypedBuilder)]
 pub struct ChangeConsensusKey {
@@ -35,7 +34,7 @@ impl TaskContext for ChangeConsensusKey {
         Some(&self.settings)
     }
 
-    async fn build_tx(&self, ctx: &Ctx) -> Result<(Tx, Vec<SigningTxData>, args::Tx), TaskError> {
+    async fn build_tx(&self, ctx: &Ctx) -> Result<(Tx, SigningData, args::Tx), TaskError> {
         let mut wallet = ctx.namada.wallet.write().await;
 
         let consensus_pk = wallet
@@ -53,17 +52,10 @@ impl TaskContext for ChangeConsensusKey {
         let source_address = wallet
             .find_address(&self.source.name)
             .ok_or_else(|| TaskError::Wallet(format!("No source address: {}", self.source.name)))?;
-        let fee_payer = wallet
-            .find_public_key(&self.settings.gas_payer.name)
-            .map_err(|e| TaskError::Wallet(e.to_string()))?;
 
         let mut change_consensus_key_builder = ctx
             .namada
             .new_change_consensus_key(source_address.into_owned(), consensus_pk);
-
-        change_consensus_key_builder =
-            change_consensus_key_builder.gas_limit(GasLimit::from(self.settings.gas_limit));
-        change_consensus_key_builder = change_consensus_key_builder.wrapper_fee_payer(fee_payer);
 
         let mut signing_keys = vec![];
         for signer in &self.settings.signers {
@@ -75,6 +67,14 @@ impl TaskContext for ChangeConsensusKey {
         change_consensus_key_builder = change_consensus_key_builder.signing_keys(signing_keys);
         drop(wallet);
 
+        let wrapper = wrapper_tx(
+            ctx,
+            Some(self.settings.gas_payer.clone()),
+            Some(self.settings.gas_limit),
+        )
+        .await;
+        change_consensus_key_builder = change_consensus_key_builder.wrap_it(Some(wrapper));
+
         let (change_consensus_key, signing_data) = change_consensus_key_builder
             .build(&ctx.namada)
             .await
@@ -82,7 +82,7 @@ impl TaskContext for ChangeConsensusKey {
 
         Ok((
             change_consensus_key,
-            vec![signing_data],
+            signing_data,
             change_consensus_key_builder.tx,
         ))
     }

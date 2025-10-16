@@ -1,8 +1,7 @@
 use std::collections::BTreeSet;
 
 use namada_sdk::args::{self, TxBuilder};
-use namada_sdk::signing::SigningTxData;
-use namada_sdk::tx::data::GasLimit;
+use namada_sdk::signing::SigningData;
 use namada_sdk::tx::Tx;
 use namada_sdk::Namada;
 use typed_builder::TypedBuilder;
@@ -13,7 +12,7 @@ use crate::error::TaskError;
 use crate::state::State;
 use crate::task::{TaskContext, TaskSettings};
 use crate::types::{Alias, Threshold};
-use crate::utils::RetryConfig;
+use crate::utils::{wrapper_tx, RetryConfig};
 
 #[derive(Clone, Debug, TypedBuilder)]
 pub struct UpdateAccount {
@@ -36,7 +35,7 @@ impl TaskContext for UpdateAccount {
         Some(&self.settings)
     }
 
-    async fn build_tx(&self, ctx: &Ctx) -> Result<(Tx, Vec<SigningTxData>, args::Tx), TaskError> {
+    async fn build_tx(&self, ctx: &Ctx) -> Result<(Tx, SigningData, args::Tx), TaskError> {
         let wallet = ctx.namada.wallet.read().await;
         let target = wallet
             .find_address(&self.target.name)
@@ -50,17 +49,9 @@ impl TaskContext for UpdateAccount {
             public_keys.push(source_pk);
         }
 
-        let fee_payer = wallet
-            .find_public_key(&self.settings.gas_payer.name)
-            .map_err(|e| TaskError::Wallet(e.to_string()))?;
-
         let mut update_account_builder =
             ctx.namada
                 .new_update_account(target.into_owned(), public_keys, self.threshold as u8);
-
-        update_account_builder =
-            update_account_builder.gas_limit(GasLimit::from(self.settings.gas_limit));
-        update_account_builder = update_account_builder.wrapper_fee_payer(fee_payer);
 
         let mut signing_keys = vec![];
         for signer in &self.settings.signers {
@@ -72,16 +63,20 @@ impl TaskContext for UpdateAccount {
         update_account_builder = update_account_builder.signing_keys(signing_keys);
         drop(wallet);
 
+        let wrapper = wrapper_tx(
+            ctx,
+            Some(self.settings.gas_payer.clone()),
+            Some(self.settings.gas_limit),
+        )
+        .await;
+        update_account_builder = update_account_builder.wrap_it(Some(wrapper));
+
         let (update_account, signing_data) = update_account_builder
             .build(&ctx.namada)
             .await
             .map_err(|e| TaskError::BuildTx(e.to_string()))?;
 
-        Ok((
-            update_account,
-            vec![signing_data],
-            update_account_builder.tx,
-        ))
+        Ok((update_account, signing_data, update_account_builder.tx))
     }
 
     async fn build_checks(

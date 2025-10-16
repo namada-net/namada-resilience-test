@@ -5,8 +5,7 @@ use namada_sdk::ibc::core::host::types::identifiers::ChannelId;
 use namada_sdk::masp_primitives;
 use namada_sdk::masp_primitives::transaction::components::sapling::builder::RngBuildParams;
 use namada_sdk::masp_primitives::zip32::PseudoExtendedKey;
-use namada_sdk::signing::SigningTxData;
-use namada_sdk::tx::data::GasLimit;
+use namada_sdk::signing::SigningData;
 use namada_sdk::tx::Tx;
 use namada_sdk::Namada;
 use namada_sdk::{TransferSource, TransferTarget};
@@ -24,7 +23,7 @@ use crate::utils::{
     base_denom, build_cosmos_ibc_transfer, cosmos_denom_hash, execute_tx, gen_shielding_tx,
     get_balance, get_block_height, get_ibc_packet_sequence, get_shielded_balance, get_token,
     ibc_denom, is_ibc_transfer_successful, is_native_denom, is_recv_packet, retry_config,
-    shielded_sync_with_retry, wait_block_settlement, RetryConfig,
+    shielded_sync_with_retry, wait_block_settlement, wrapper_tx, RetryConfig,
 };
 
 #[derive(Clone, Debug, TypedBuilder)]
@@ -54,7 +53,7 @@ impl TaskContext for IbcTransferSend {
         Some(&self.settings)
     }
 
-    async fn build_tx(&self, ctx: &Ctx) -> Result<(Tx, Vec<SigningTxData>, args::Tx), TaskError> {
+    async fn build_tx(&self, ctx: &Ctx) -> Result<(Tx, SigningData, args::Tx), TaskError> {
         let mut bparams = RngBuildParams::new(OsRng);
 
         let wallet = ctx.namada.wallet.read().await;
@@ -63,9 +62,6 @@ impl TaskContext for IbcTransferSend {
             .find_address(&self.source.name)
             .ok_or_else(|| TaskError::Wallet(format!("No source address: {}", self.source.name)))?;
         let (token_address, amount) = get_token(ctx, &self.denom, self.amount).await?;
-        let fee_payer = wallet
-            .find_public_key(&self.settings.gas_payer.name)
-            .map_err(|e| TaskError::Wallet(e.to_string()))?;
 
         let source = TransferSource::Address(source_address.into_owned());
         let mut tx_builder = ctx.namada.new_ibc_transfer(
@@ -74,9 +70,8 @@ impl TaskContext for IbcTransferSend {
             token_address,
             amount,
             self.src_channel_id.clone(),
+            None,
         );
-        tx_builder = tx_builder.gas_limit(GasLimit::from(self.settings.gas_limit));
-        tx_builder = tx_builder.wrapper_fee_payer(fee_payer);
         let mut signing_keys = vec![];
         for signer in &self.settings.signers {
             let public_key = wallet
@@ -87,12 +82,20 @@ impl TaskContext for IbcTransferSend {
         tx_builder = tx_builder.signing_keys(signing_keys);
         drop(wallet);
 
+        let wrapper = wrapper_tx(
+            ctx,
+            Some(self.settings.gas_payer.clone()),
+            Some(self.settings.gas_limit),
+        )
+        .await;
+        tx_builder = tx_builder.wrap_it(Some(wrapper));
+
         let (transfer_tx, signing_data, _) = tx_builder
             .build(&ctx.namada, &mut bparams)
             .await
             .map_err(|e| TaskError::BuildTx(e.to_string()))?;
 
-        Ok((transfer_tx, vec![signing_data], tx_builder.tx))
+        Ok((transfer_tx, signing_data, tx_builder.tx))
     }
 
     async fn execute(&self, ctx: &Ctx) -> Result<Height, TaskError> {
@@ -196,7 +199,7 @@ impl TaskContext for IbcTransferRecv {
         Some(&self.settings)
     }
 
-    async fn build_tx(&self, _ctx: &Ctx) -> Result<(Tx, Vec<SigningTxData>, args::Tx), TaskError> {
+    async fn build_tx(&self, _ctx: &Ctx) -> Result<(Tx, SigningData, args::Tx), TaskError> {
         unreachable!("Namada tx shouldn't be built")
     }
 
@@ -327,7 +330,7 @@ impl TaskContext for IbcShieldingTransfer {
         Some(&self.settings)
     }
 
-    async fn build_tx(&self, _ctx: &Ctx) -> Result<(Tx, Vec<SigningTxData>, args::Tx), TaskError> {
+    async fn build_tx(&self, _ctx: &Ctx) -> Result<(Tx, SigningData, args::Tx), TaskError> {
         unreachable!("Namada tx shouldn't be built")
     }
 
@@ -479,7 +482,7 @@ impl TaskContext for IbcUnshieldingTransfer {
         Some(&self.settings)
     }
 
-    async fn build_tx(&self, ctx: &Ctx) -> Result<(Tx, Vec<SigningTxData>, args::Tx), TaskError> {
+    async fn build_tx(&self, ctx: &Ctx) -> Result<(Tx, SigningData, args::Tx), TaskError> {
         let mut bparams = RngBuildParams::new(OsRng);
 
         let mut wallet = ctx.namada.wallet.write().await;
@@ -512,16 +515,6 @@ impl TaskContext for IbcUnshieldingTransfer {
                 ))
             })?
             .into_owned();
-
-        let fee_payer = if disposable_gas_payer {
-            None
-        } else {
-            Some(
-                wallet
-                    .find_public_key(&self.settings.gas_payer.name)
-                    .map_err(|e| TaskError::Wallet(e.to_string()))?,
-            )
-        };
         drop(wallet);
 
         let (token_address, amount) = get_token(ctx, &self.denom, self.amount).await?;
@@ -532,13 +525,22 @@ impl TaskContext for IbcUnshieldingTransfer {
             token_address,
             amount,
             self.src_channel_id.clone(),
+            None,
         );
         tx_builder.gas_spending_key = gas_spending_key;
         tx_builder.refund_target = Some(TransferTarget::Address(refund_target));
-        tx_builder = tx_builder.gas_limit(GasLimit::from(self.settings.gas_limit));
-        if let Some(fee_payer) = fee_payer {
-            tx_builder = tx_builder.wrapper_fee_payer(fee_payer);
-        }
+
+        let wrapper = wrapper_tx(
+            ctx,
+            if disposable_gas_payer {
+                None
+            } else {
+                Some(self.settings.gas_payer.clone())
+            },
+            Some(self.settings.gas_limit),
+        )
+        .await;
+        tx_builder = tx_builder.wrap_it(Some(wrapper));
 
         // signing key isn't needed for unshielding transfer
 
@@ -547,7 +549,7 @@ impl TaskContext for IbcUnshieldingTransfer {
             .await
             .map_err(|e| TaskError::BuildTx(e.to_string()))?;
 
-        Ok((transfer_tx, vec![signing_data], tx_builder.tx))
+        Ok((transfer_tx, signing_data, tx_builder.tx))
     }
 
     async fn execute(&self, ctx: &Ctx) -> Result<Height, TaskError> {

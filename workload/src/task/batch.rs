@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use namada_sdk::{args, signing::SigningTxData, tx::Tx};
+use namada_sdk::{args, signing::SigningData, tx::Tx};
 use typed_builder::TypedBuilder;
 
 use crate::check::{self, Check};
@@ -45,14 +45,11 @@ impl TaskContext for Batch {
         Some(&self.settings)
     }
 
-    async fn build_tx(&self, ctx: &Ctx) -> Result<(Tx, Vec<SigningTxData>, args::Tx), TaskError> {
+    async fn build_tx(&self, ctx: &Ctx) -> Result<(Tx, SigningData, args::Tx), TaskError> {
         let mut txs = vec![];
         for task in &self.tasks {
-            let (tx, mut signing_data, _) = Box::pin(task.build_tx(ctx)).await?;
-            if signing_data.len() != 1 {
-                return Err(TaskError::BuildTx("Unexpected sigining data".to_string()));
-            }
-            txs.push((tx, signing_data.remove(0)));
+            let (tx, signing_data, _) = Box::pin(task.build_tx(ctx)).await?;
+            txs.push((tx, signing_data));
         }
 
         merge_tx(ctx, txs, &self.settings).await

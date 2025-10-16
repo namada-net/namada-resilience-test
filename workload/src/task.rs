@@ -3,7 +3,7 @@ use std::fmt::Display;
 
 use cosmrs::Any;
 use enum_dispatch::enum_dispatch;
-use namada_sdk::{args, signing::SigningTxData, tx::Tx};
+use namada_sdk::{args, signing::SigningData, tx::Tx};
 use tokio::time::{sleep, Duration};
 
 use crate::check::Check;
@@ -158,7 +158,7 @@ pub trait TaskContext {
     fn task_settings(&self) -> Option<&TaskSettings>;
 
     #[allow(async_fn_in_trait)]
-    async fn build_tx(&self, ctx: &Ctx) -> Result<(Tx, Vec<SigningTxData>, args::Tx), TaskError>;
+    async fn build_tx(&self, ctx: &Ctx) -> Result<(Tx, SigningData, args::Tx), TaskError>;
 
     #[allow(async_fn_in_trait)]
     async fn execute(&self, ctx: &Ctx) -> Result<Height, TaskError> {

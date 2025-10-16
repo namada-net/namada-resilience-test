@@ -1,6 +1,5 @@
 use namada_sdk::args::{self, TxBuilder};
-use namada_sdk::signing::SigningTxData;
-use namada_sdk::tx::data::GasLimit;
+use namada_sdk::signing::SigningData;
 use namada_sdk::tx::Tx;
 use namada_sdk::Namada;
 use typed_builder::TypedBuilder;
@@ -11,7 +10,7 @@ use crate::error::TaskError;
 use crate::state::State;
 use crate::task::{TaskContext, TaskSettings};
 use crate::types::Alias;
-use crate::utils::RetryConfig;
+use crate::utils::{wrapper_tx, RetryConfig};
 
 #[derive(Clone, Debug, TypedBuilder)]
 pub struct ChangeMetadata {
@@ -37,14 +36,11 @@ impl TaskContext for ChangeMetadata {
         Some(&self.settings)
     }
 
-    async fn build_tx(&self, ctx: &Ctx) -> Result<(Tx, Vec<SigningTxData>, args::Tx), TaskError> {
+    async fn build_tx(&self, ctx: &Ctx) -> Result<(Tx, SigningData, args::Tx), TaskError> {
         let wallet = ctx.namada.wallet.read().await;
         let source_address = wallet
             .find_address(&self.source.name)
             .ok_or_else(|| TaskError::Wallet(format!("No source address: {}", self.source.name)))?;
-        let fee_payer = wallet
-            .find_public_key(&self.settings.gas_payer.name)
-            .map_err(|e| TaskError::Wallet(e.to_string()))?;
 
         let mut change_metadata_tx_builder = ctx
             .namada
@@ -54,10 +50,6 @@ impl TaskContext for ChangeMetadata {
             .discord_handle(self.discord.clone())
             .email(self.email.clone())
             .website(self.website.clone());
-
-        change_metadata_tx_builder =
-            change_metadata_tx_builder.gas_limit(GasLimit::from(self.settings.gas_limit));
-        change_metadata_tx_builder = change_metadata_tx_builder.wrapper_fee_payer(fee_payer);
 
         let mut signing_keys = vec![];
         for signer in &self.settings.signers {
@@ -69,16 +61,20 @@ impl TaskContext for ChangeMetadata {
         change_metadata_tx_builder = change_metadata_tx_builder.signing_keys(signing_keys);
         drop(wallet);
 
+        let wrapper = wrapper_tx(
+            ctx,
+            Some(self.settings.gas_payer.clone()),
+            Some(self.settings.gas_limit),
+        )
+        .await;
+        change_metadata_tx_builder = change_metadata_tx_builder.wrap_it(Some(wrapper));
+
         let (change_metadata, signing_data) = change_metadata_tx_builder
             .build(&ctx.namada)
             .await
             .map_err(|e| TaskError::BuildTx(e.to_string()))?;
 
-        Ok((
-            change_metadata,
-            vec![signing_data],
-            change_metadata_tx_builder.tx,
-        ))
+        Ok((change_metadata, signing_data, change_metadata_tx_builder.tx))
     }
 
     async fn build_checks(

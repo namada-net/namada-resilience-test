@@ -517,8 +517,7 @@ async fn shielded_sync(
             .await
             .map_err(|e| QueryError::ShieldedSync(e.to_string()))
     } else {
-        let masp_client =
-            LedgerMaspClient::new(ctx.namada.clone_client(), 10, time::Duration::from_secs(1));
+        let masp_client = LedgerMaspClient::new(ctx.namada.clone_client(), 10);
 
         let config = ShieldedSyncConfig::builder()
             .client(masp_client)
@@ -537,10 +536,7 @@ async fn shielded_sync(
 
     if res.is_err() {
         // revert the shielded context
-        shielded_ctx
-            .load()
-            .await
-            .map_err(|e| QueryError::ShieldedSync(e.to_string()))?;
+        shielded_ctx.load().await;
     }
 
     tracing::info!(

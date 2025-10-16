@@ -1,8 +1,7 @@
 use std::collections::BTreeSet;
 
 use namada_sdk::args::{self, TxBuilder};
-use namada_sdk::signing::SigningTxData;
-use namada_sdk::tx::data::GasLimit;
+use namada_sdk::signing::SigningData;
 use namada_sdk::tx::Tx;
 use namada_sdk::Namada;
 use typed_builder::TypedBuilder;
@@ -13,7 +12,7 @@ use crate::error::TaskError;
 use crate::state::State;
 use crate::task::{TaskContext, TaskSettings};
 use crate::types::{Alias, Threshold};
-use crate::utils::RetryConfig;
+use crate::utils::{wrapper_tx, RetryConfig};
 
 #[derive(Clone, Debug, TypedBuilder)]
 pub struct InitAccount {
@@ -36,7 +35,7 @@ impl TaskContext for InitAccount {
         Some(&self.settings)
     }
 
-    async fn build_tx(&self, ctx: &Ctx) -> Result<(Tx, Vec<SigningTxData>, args::Tx), TaskError> {
+    async fn build_tx(&self, ctx: &Ctx) -> Result<(Tx, SigningData, args::Tx), TaskError> {
         let wallet = ctx.namada.wallet.read().await;
 
         let mut public_keys = vec![];
@@ -47,19 +46,11 @@ impl TaskContext for InitAccount {
             public_keys.push(source_pk);
         }
 
-        let fee_payer = wallet
-            .find_public_key(&self.settings.gas_payer.name)
-            .map_err(|e| TaskError::Wallet(e.to_string()))?;
-
         let mut init_account_builder = ctx
             .namada
             .new_init_account(public_keys, Some(self.threshold as u8))
             .initialized_account_alias(self.target.name.clone())
             .wallet_alias_force(true);
-
-        init_account_builder =
-            init_account_builder.gas_limit(GasLimit::from(self.settings.gas_limit));
-        init_account_builder = init_account_builder.wrapper_fee_payer(fee_payer);
 
         let mut signing_keys = vec![];
         for signer in &self.settings.signers {
@@ -71,12 +62,20 @@ impl TaskContext for InitAccount {
         init_account_builder = init_account_builder.signing_keys(signing_keys);
         drop(wallet);
 
+        let wrapper = wrapper_tx(
+            ctx,
+            Some(self.settings.gas_payer.clone()),
+            Some(self.settings.gas_limit),
+        )
+        .await;
+        init_account_builder = init_account_builder.wrap_it(Some(wrapper));
+
         let (init_account_tx, signing_data) = init_account_builder
             .build(&ctx.namada)
             .await
             .map_err(|e| TaskError::BuildTx(e.to_string()))?;
 
-        Ok((init_account_tx, vec![signing_data], init_account_builder.tx))
+        Ok((init_account_tx, signing_data, init_account_builder.tx))
     }
 
     async fn build_checks(

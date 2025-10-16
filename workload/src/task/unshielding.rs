@@ -2,8 +2,7 @@ use namada_sdk::args::{self, TxBuilder, TxShieldedSource, TxTransparentTarget};
 use namada_sdk::masp_primitives;
 use namada_sdk::masp_primitives::transaction::components::sapling::builder::RngBuildParams;
 use namada_sdk::masp_primitives::zip32::PseudoExtendedKey;
-use namada_sdk::signing::SigningTxData;
-use namada_sdk::tx::data::GasLimit;
+use namada_sdk::signing::SigningData;
 use namada_sdk::tx::Tx;
 use namada_sdk::Namada;
 use rand::rngs::OsRng;
@@ -17,7 +16,7 @@ use crate::task::{TaskContext, TaskSettings};
 use crate::types::{Alias, Amount, Height, MaspEpoch};
 use crate::utils::{
     get_balance, get_shielded_balance, get_token, is_native_denom, shielded_sync_with_retry,
-    RetryConfig,
+    wrapper_tx, RetryConfig,
 };
 
 #[derive(Clone, Debug, TypedBuilder)]
@@ -58,7 +57,7 @@ impl TaskContext for Unshielding {
         Some(&self.settings)
     }
 
-    async fn build_tx(&self, ctx: &Ctx) -> Result<(Tx, Vec<SigningTxData>, args::Tx), TaskError> {
+    async fn build_tx(&self, ctx: &Ctx) -> Result<(Tx, SigningData, args::Tx), TaskError> {
         let mut bparams = RngBuildParams::new(OsRng);
 
         let mut wallet = ctx.namada.wallet.write().await;
@@ -85,15 +84,6 @@ impl TaskContext for Unshielding {
             .ok_or_else(|| TaskError::Wallet(format!("No target address: {}", self.target.name)))?
             .into_owned();
 
-        let fee_payer = if disposable_gas_payer {
-            None
-        } else {
-            Some(
-                wallet
-                    .find_public_key(&self.settings.gas_payer.name)
-                    .map_err(|e| TaskError::Wallet(e.to_string()))?,
-            )
-        };
         drop(wallet);
 
         let (token, amount) = get_token(ctx, &self.denom, self.amount).await?;
@@ -111,12 +101,19 @@ impl TaskContext for Unshielding {
 
         let mut transfer_tx_builder =
             ctx.namada
-                .new_unshielding_transfer(sources, targets, gas_spending_key);
-        transfer_tx_builder =
-            transfer_tx_builder.gas_limit(GasLimit::from(self.settings.gas_limit));
-        if let Some(fee_payer) = fee_payer {
-            transfer_tx_builder = transfer_tx_builder.wrapper_fee_payer(fee_payer);
-        }
+                .new_unshielding_transfer(sources, targets, gas_spending_key, None);
+
+        let wrapper = wrapper_tx(
+            ctx,
+            if disposable_gas_payer {
+                None
+            } else {
+                Some(self.settings.gas_payer.clone())
+            },
+            Some(self.settings.gas_limit),
+        )
+        .await;
+        transfer_tx_builder = transfer_tx_builder.wrap_it(Some(wrapper));
 
         // signing key isn't needed for unshielding transfer
 
@@ -125,7 +122,7 @@ impl TaskContext for Unshielding {
             .await
             .map_err(|e| TaskError::BuildTx(e.to_string()))?;
 
-        Ok((transfer_tx, vec![signing_data], transfer_tx_builder.tx))
+        Ok((transfer_tx, signing_data, transfer_tx_builder.tx))
     }
 
     async fn execute(&self, ctx: &Ctx) -> Result<Height, TaskError> {

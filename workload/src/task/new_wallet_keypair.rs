@@ -1,5 +1,5 @@
 use namada_sdk::args;
-use namada_sdk::signing::SigningTxData;
+use namada_sdk::signing::SigningData;
 use namada_sdk::tx::Tx;
 use typed_builder::TypedBuilder;
 
@@ -35,7 +35,7 @@ impl TaskContext for NewWalletKeyPair {
         None
     }
 
-    async fn build_tx(&self, ctx: &Ctx) -> Result<(Tx, Vec<SigningTxData>, args::Tx), TaskError> {
+    async fn build_tx(&self, ctx: &Ctx) -> Result<(Tx, SigningData, args::Tx), TaskError> {
         let wallet = ctx.namada.wallet.read().await;
         let public_key = wallet
             .find_public_key(&self.source.name)
